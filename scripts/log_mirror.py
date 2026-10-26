@@ -7,6 +7,10 @@ keeps a copy that is only ever added to (a runner-side tool, not task code):
     shrinks, is replaced (new inode) or has its already-mirrored tail rewritten, everything mirrored so far stays and the
     file continues in a new segment (<name>.seg1, ...);
   * any other file: every version it takes is kept (<name>.v0, .v1, ...);
+  * a SQLite database (OpenCode keeps its sessions in /logs/agent/opencode/xdg-data/opencode/opencode.db, with a -wal
+    beside it that changes on every write): a version at most every SQLITE_GAP seconds, the last one once it stops
+    changing; its -shm index (shared memory, rebuilt from the -wal) is not mirrored. Every 5 s it would be a whole copy
+    of a file of megabytes, for hours, per trial;
   * a file that disappears keeps its mirror.
 Every such event goes to <mirror>/TAMPER.log. Run it as root in a container so the host user cannot delete the mirror
 either (scripts/run_agent_batch.sh starts one: rcb-log-mirror).
@@ -25,6 +29,9 @@ import time
 
 SRC, MIRROR, STATE = "", "", ""
 APPEND_EXT = (".jsonl", ".txt", ".log", ".err")
+SQLITE_EXT = (".db", ".db-wal", ".db-journal", ".sqlite", ".sqlite-wal", ".sqlite3")
+SQLITE_SKIP = ("-shm",)
+SQLITE_GAP = 300.0
 TAIL = 4096
 
 
@@ -63,15 +70,17 @@ def sync_append(src: str, rel: str, st: os.stat_result, s: dict | None) -> dict:
     return s
 
 
-def sync_version(src: str, rel: str, st: os.stat_result, s: dict | None) -> dict:
+def sync_version(src: str, rel: str, st: os.stat_result, s: dict | None, gap: float = 0.0) -> dict:
     sig = [st.st_ino, st.st_size, st.st_mtime_ns]
     if s is not None and s.get("sig") == sig:
         return s
+    if s is not None and time.time() - s.get("t", 0.0) < gap:
+        return s                    # not yet: the next round still sees the change (its sig is not taken)
     n = 0 if s is None else s["n"] + 1
     dst = os.path.join(MIRROR, rel) + f".v{n}"
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     shutil.copy2(src, dst)
-    return {"sig": sig, "n": n}
+    return {"sig": sig, "n": n, "t": time.time()}
 
 
 def once(state: dict) -> None:
@@ -79,13 +88,17 @@ def once(state: dict) -> None:
     for agent_dir in glob.glob(os.path.join(SRC, "*", "*", "agent")):
         for root, _, files in os.walk(agent_dir):
             for name in files:
+                if name.endswith(SQLITE_SKIP):
+                    continue
                 src = os.path.join(root, name)
                 rel = os.path.relpath(src, SRC)
                 seen.add(rel)
                 try:
                     st = os.stat(src)
-                    fn = sync_append if name.endswith(APPEND_EXT) else sync_version
-                    state[rel] = fn(src, rel, st, state.get(rel))
+                    if name.endswith(APPEND_EXT):
+                        state[rel] = sync_append(src, rel, st, state.get(rel))
+                    else:
+                        state[rel] = sync_version(src, rel, st, state.get(rel), SQLITE_GAP if name.endswith(SQLITE_EXT) else 0.0)
                     state[rel].pop("gone", None)
                 except (FileNotFoundError, PermissionError):
                     continue

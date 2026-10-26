@@ -198,6 +198,9 @@ def main(argv):
         for f in ("replay.mp4", "replay.last.png", "replay.first.mp4", "replay.first.last.png"):
             if (trial / "verifier" / f).exists(): shutil.copy(trial / "verifier" / f, out / f)
         ok = status == "success"
+        # the usage gateway counts every model call; Harbor's count is the harness's own (OpenCode's leaves out cache
+        # writes, reasoning and its session-title calls)
+        gwt = load_json(trial / "gateway/totals.json")
         lines = [f"# {label} — {task}\n",
                  f"Run: Harbor job `{job}`, trial `{trial.name}`, {(r.get('started_at') or '')[:10]}. Mode: **{ {'standard': 'standard (robot as a service)', 'standard-realtime': 'standard-realtime (robot as a service, time does not stop)'}.get(mode, 'privileged')}**.\n",
                  "| | |", "|---|---|",
@@ -210,7 +213,8 @@ def main(argv):
                    if cfg["first_success"] is not None else []),
                  f"| agent time | {span(r.get('agent_execution') or {})} s |",
                  f"| actions / physics steps | {rw.get('steps') or rw.get('n_actions') or '—'} / {rw.get('sim_steps') or '—'} |",
-                 f"| tokens in / out | {ar.get('n_input_tokens')} / {ar.get('n_output_tokens')} |",
+                 f"| tokens in / out | {ar.get('n_input_tokens')} / {ar.get('n_output_tokens')}"
+                 + (f"; usage gateway {gwt.get('input')} / {gwt.get('output')}" if gwt else "") + " |",
                  f"| verifier | `{json.dumps({k: v for k, v in rw.items() if k not in ('agent_sessions','agent_records','agent_replays')})}` |",
                  f"| verifier sandbox | {r.get('verifier_environment_mode')} |\n"]
         if not limited and rw.get("agent_resets") is not None:

@@ -498,6 +498,62 @@ def test_gateway_restart():
         check(len(pids) == 2, f"the second job did not run behind a new gateway: {runs}")
 
 
+ARGV_HARBOR = r'''#!/usr/bin/env python3
+import json, os, sys
+with open(os.environ["FAKE_HARBOR_OUT"], "a") as f:
+    f.write(json.dumps(sys.argv[1:]) + "\n")
+'''
+
+
+def test_opencode_args():
+    """AGENT=opencode: OpenCode's own options (its model variant, the checked version, one opencode_config argument with
+    one model, no web tools and the base URL in OpenCode's form, through the gateway when it is on) and none of the
+    other harnesses'; refused before any job: a provider the gateway cannot carry, an AK with an opencode_config."""
+    opt = lambda argv, flag: [argv[i + 1] for i, x in enumerate(argv) if x == flag]
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        (td / "bin").mkdir()
+        (td / "bin/harbor").write_text(ARGV_HARBOR); (td / "bin/harbor").chmod(0o755)
+
+        def run(label, **extra):
+            rec = td / f"{label}.jsonl"
+            env = {k: v for k, v in os.environ.items() if k not in ("AGENT_VERSION", "AGENT_CONFIG", "AK", "WEB_SEARCH")}
+            env.update({"PATH": f"{td / 'bin'}:{os.environ['PATH']}", "FAKE_HARBOR_OUT": str(rec), "JOBS": str(td / f"jobs-{label}"),
+                        "RESULTS": "", "LOG_MIRROR": "0", "MEM_GUARD": "0", "MODES": "standard", "HOST_CPUS": "64",
+                        "AGENT": "opencode", "MODEL": "anthropic/claude-opus-5-5", "EFFORT": "high", "ANTHROPIC_BASE_URL": "",
+                        **extra})
+            r = subprocess.run(["bash", str(ROOT / "scripts/run_agent_batch.sh"), f"oc{label}", SMALL], env=env,
+                               capture_output=True, text=True, timeout=300)
+            return r, [json.loads(l) for l in rec.read_text().splitlines()] if rec.exists() else []
+
+        gw = {"GATEWAY": "1", "GATEWAY_BIND": "127.0.0.1", "GATEWAY_EGRESS": "task"}
+        for label, extra, base in (("plain", {"GATEWAY": "0"}, None),
+                                   ("relay", {"GATEWAY": "0", "ANTHROPIC_BASE_URL": "https://relay.example/api/"},
+                                    "https://relay.example/api/v1"),
+                                   ("gateway", gw, "/u/api.anthropic.com/v1")):
+            r, runs = run(label, **extra)
+            check(r.returncode == 0 and len(runs) == 1, f"opencode {label}: rc {r.returncode}, harbor ran {len(runs)} times: {r.stderr[-500:]}")
+            if not runs:
+                continue
+            a, ak, ae = runs[0], opt(runs[0], "--ak"), opt(runs[0], "--ae")
+            check(a[a.index("-a") + 1] == "opencode" and "variant=high" in ak and "version=1.19.4" in ak, f"opencode {label}: {ak}")
+            check(not [k for k in ak if k.split("=", 1)[0] in ("reasoning_effort", "config", "web_search", "disallowed_tools")],
+                  f"opencode {label} got another harness's option: {ak}")
+            oc = [json.loads(k.split("=", 1)[1]) for k in ak if k.startswith("opencode_config=")]
+            check(len(oc) == 1, f"opencode {label}: {len(oc)} opencode_config arguments")
+            cfg = oc[0] if oc else {}
+            check(cfg.get("small_model") == "anthropic/claude-opus-5-5"
+                  and cfg.get("permission") == {"webfetch": "deny", "websearch": "deny"}, f"opencode {label}: {cfg}")
+            got = (((cfg.get("provider") or {}).get("anthropic") or {}).get("options") or {}).get("baseURL")
+            want = got == base if not (base or "").startswith("/u/") else (got or "").startswith("http://127.0.0.1:") and got.endswith(base)
+            check(want, f"opencode {label}: baseURL {got}, want {base}")
+            check("OPENCODE_DISABLE_MODELS_FETCH=1" in ae and not [e for e in ae if "_BASE_URL=" in e], f"opencode {label}: --ae {ae}")
+        for label, extra in (("openrouter", {**gw, "MODEL": "openrouter/anthropic/claude-opus-5-5"}),
+                             ("ak", {"GATEWAY": "0", "AK": "--ak opencode_config={}"})):
+            r, runs = run(label, **extra)
+            check(r.returncode == 2 and not runs, f"opencode {label} was not refused: rc {r.returncode}, harbor ran {len(runs)} times")
+
+
 if __name__ == "__main__":
     test_results()
     test_config_and_attempts()
@@ -508,7 +564,8 @@ if __name__ == "__main__":
     test_clamp()
     test_batch_runner()
     test_gateway_restart()
+    test_opencode_args()
     if fails:
         print(f"{len(fails)} failure(s)")
         sys.exit(1)
-    print("ok: write_task_results not-a-result cases, config.json and attempts, the first-attempt result, the summary per configuration, the core set, clamp_cpus, run_agent_batch.sh stamped job copies, clamped copies and gateway restart")
+    print("ok: write_task_results not-a-result cases, config.json and attempts, the first-attempt result, the summary per configuration, the core set, clamp_cpus, run_agent_batch.sh stamped job copies, clamped copies, gateway restart and OpenCode's options")

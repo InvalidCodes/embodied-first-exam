@@ -4,16 +4,23 @@
 #   scripts/run_agent_batch.sh <batch-name> <base> [<base> ...]      # <base> = a task name without its -privileged / -standard
 # Official runs use Harbor's native agents only (PROTOCOL D11): no adapter; the transparent usage gateway below only
 # records and is off by default. Env (defaults):
-#   AGENT        codex | claude-code (codex)        MODEL   the -m model (openai/gpt-6-astra)
-#   EFFORT       reasoning effort, --ak reasoning_effort=<EFFORT> (xhigh); `default` passes none
+#   AGENT        codex | claude-code | opencode (codex)        MODEL   the -m model (openai/gpt-6-astra)
+#   EFFORT       reasoning effort, --ak reasoning_effort=<EFFORT> (xhigh); OpenCode: --ak variant=<EFFORT>, the model's
+#                variant of that name (Claude: low .. max; GPT: none .. xhigh), which OpenCode ignores silently when the
+#                model has none of that name; `default` passes none
+#   AGENT_VERSION the harness version Harbor installs, --ak version=<v>; unset: Harbor's choice, except OpenCode 1.19.4,
+#                the version scripts/opencode_config.py and the usage gateway's paths were checked against ("" = latest)
 #   AK           more agent options, e.g. "--ak reasoning_summary=detailed"
 #   WEB_SEARCH   disabled (default) = the harness offers the model no web search: Codex --ak web_search=disabled,
-#                Claude Code --ak disallowed_tools=WebSearch,WebFetch (PROTOCOL D11; the search runs at the model
+#                Claude Code --ak disallowed_tools=WebSearch,WebFetch, OpenCode webfetch and websearch denied in its
+#                config (PROTOCOL D11; the search runs at the model
 #                provider, past any egress allowlist), and Codex none of the other tools that run there (a ChatGPT
 #                login's connectors and apps, plugins, image generation: those features = false in a copy of
 #                AGENT_CONFIG, scripts/codex_tools_off.py); "allowed" = leave the harness default (not for official runs)
 #   AGENT_CONFIG a native config file, --ak config=<file>: Codex's config.toml (an Azure provider; retries with
-#                request_max_retries / stream_max_retries) or Claude Code's settings
+#                request_max_retries / stream_max_retries) or Claude Code's settings; OpenCode: a JSON OpenCode config
+#                merged into the run's own (scripts/opencode_config.py: one model, no web tools, its base URL), e.g. a
+#                model's limits that OpenCode's catalog lacks
 #   ENV_FILE     a .env file Harbor loads (--env-file); without it the credentials come from this environment
 #   Credentials, as Harbor's agents read them (docs/protocol/running.md):
 #     OpenRouter   codex: OPENAI_API_KEY=<openrouter key> OPENAI_BASE_URL=https://openrouter.ai/api/v1
@@ -21,6 +28,9 @@
 #     ChatGPT login (codex)          CODEX_FORCE_AUTH_JSON=1 (Harbor uploads ~/.codex/auth.json into each trial)
 #     Claude subscription            CLAUDE_FORCE_OAUTH=1 and CLAUDE_CODE_OAUTH_TOKEN (`claude setup-token`)
 #     Azure OpenAI (codex)           AGENT_CONFIG=<config.toml with the Azure provider> and its key variable
+#     OpenCode     the provider's key: ANTHROPIC_API_KEY (-m anthropic/...) or OPENAI_API_KEY (-m openai/...); with
+#                  GATEWAY=1 only these two: OpenCode reaches other providers, OpenRouter too, by chat completions,
+#                  which the usage gateway does not forward
 #   MODES        "privileged standard"   K  attempts per task (1); add `standard-realtime` for <base>-standard-realtime where it exists
 #   SEQ          1 = one trial at a time per runner (default): task by task, each mode in MODES order, one Harbor job per
 #                task and mode ($JOBS/<batch>-<mode>-<task>/). Start the same command again to add a lane: every job is
@@ -96,7 +106,9 @@ JOBS="$(abspath "$JOBS")"; ENV_FILE="$(abspath "$ENV_FILE")"; AGENT_CONFIG="$(ab
 [ -n "${RESULTS:-}" ] && RESULTS="$(abspath "$RESULTS")"
 [ -n "${CODEX_AUTH_JSON_PATH:-}" ] && { CODEX_AUTH_JSON_PATH="$(abspath "$CODEX_AUTH_JSON_PATH")"; export CODEX_AUTH_JSON_PATH; }
 TOKEN_BUDGET_IN="${TOKEN_BUDGET_IN:-10000000000}"; TOKEN_BUDGET_OUT="${TOKEN_BUDGET_OUT:-10000000000}"
-case "$AGENT" in codex|claude-code) ;; *) echo "AGENT must be a Harbor native agent: codex or claude-code (PROTOCOL D11)" >&2; exit 2 ;; esac
+case "$AGENT" in codex|claude-code|opencode) ;; *) echo "AGENT must be a Harbor native agent: codex, claude-code or opencode (PROTOCOL D11)" >&2; exit 2 ;; esac
+case "$AGENT:$GATEWAY:${MODEL%%/*}" in opencode:1:anthropic|opencode:1:openai|opencode:0:*|codex:*|claude-code:*) ;;
+  *) echo "GATEWAY=1 runs OpenCode on anthropic/ or openai/ models only: OpenCode reaches ${MODEL%%/*} by chat completions, which the usage gateway does not forward" >&2; exit 2 ;; esac
 # Run id (D4): harness = the agent name with - -> _; model = MODEL's last path segment, lower case, gpt-<n> joined
 # (gpt-6-astra -> gpt6_astra), a leading claude- dropped (claude-fable-5-1 -> fable_5_1), every other
 # character outside [a-z0-9] -> _; effort as given ("default" when the harness sets none).
@@ -108,27 +120,34 @@ if [ -z "${RUN_ID:-}" ]; then
 fi
 [[ "$RUN_ID" =~ ^[a-z0-9_]+-[a-z0-9_]+-(none|minimal|low|medium|high|xhigh|max|default)$ ]] || { echo "run id $RUN_ID is not <harness>-<model>-<effort>" >&2; exit 2; }
 AGENT_ARGS=(-a "$AGENT" -m "$MODEL")
-[ "$EFFORT" != default ] && AGENT_ARGS+=(--ak "reasoning_effort=$EFFORT")
+case "$AGENT:$EFFORT" in
+  *:default) ;;
+  opencode:*) AGENT_ARGS+=(--ak "variant=$EFFORT") ;;        # OpenCode has no reasoning_effort option: its model variants
+  *) AGENT_ARGS+=(--ak "reasoning_effort=$EFFORT") ;;
+esac
+[ "$AGENT" = opencode ] && [ -z "${AGENT_VERSION+set}" ] && AGENT_VERSION=1.19.4
+[ -n "${AGENT_VERSION:-}" ] && AGENT_ARGS+=(--ak "version=$AGENT_VERSION")
 # Codex's other provider-side tools go off with the web search (PROTOCOL D11). Under a ChatGPT login Codex hands the
 # model the account's connectors and apps (mcp__codex_apps__*: GitHub fetch, a web search of their own, mail, drives),
 # plugin installs and an image generator; they run at OpenAI, reached through chatgpt.com, so neither
 # web_search=disabled nor an egress allowlist stops them. The run's config is a copy of AGENT_CONFIG (or an empty one)
 # with those features = false; a config that turns one of them on is refused, never overridden silently.
-# Harbor keeps the last --ak of a key: a config=... in AK would replace the one written here (and the gateway's copy)
-case " $AK " in *[[:space:]]config=*) echo "AK must not carry config=...: name the file in AGENT_CONFIG" >&2; exit 2 ;; esac
+# Harbor keeps the last --ak of a key: a config=... in AK would replace the one written here (and the gateway's copy),
+# an opencode_config=... the one written below
+case " $AK " in *[[:space:]]config=*|*[[:space:]]opencode_config=*) echo "AK must not carry config=... or opencode_config=...: name the file in AGENT_CONFIG" >&2; exit 2 ;; esac
 if [ "$WEB_SEARCH" = disabled ] && [ "$AGENT" = codex ]; then
   mkdir -p "$JOBS/.agent-config" && cfg="$JOBS/.agent-config/config.toml.$$" \
     && python3 "$R/scripts/codex_tools_off.py" ${AGENT_CONFIG:+"$AGENT_CONFIG"} > "$cfg" && grep -q '^features\.apps = false$\|^apps = false$' "$cfg" \
     || { echo "no Codex config without provider-side tools could be written from AGENT_CONFIG=${AGENT_CONFIG:-(none)} (see above); WEB_SEARCH=disabled needs it" >&2; exit 2; }
   AGENT_CONFIG="$cfg"
 fi
-[ -n "$AGENT_CONFIG" ] && AGENT_ARGS+=(--ak "config=$AGENT_CONFIG")
+[ -n "$AGENT_CONFIG" ] && [ "$AGENT" != opencode ] && AGENT_ARGS+=(--ak "config=$AGENT_CONFIG")   # OpenCode's: below
 # shellcheck disable=SC2206
 AGENT_ARGS+=($AK)
 # no harness web search unless asked for (PROTOCOL D11): it runs at the model provider, so no egress allowlist stops it
 case "$WEB_SEARCH" in
   disabled) if [ "$AGENT" = codex ]; then AGENT_ARGS+=(--ak web_search=disabled)
-            else AGENT_ARGS+=(--ak disallowed_tools=WebSearch,WebFetch); fi ;;
+            elif [ "$AGENT" = claude-code ]; then AGENT_ARGS+=(--ak disallowed_tools=WebSearch,WebFetch); fi ;;   # OpenCode: its config, below
   allowed) ;;
   *) echo "WEB_SEARCH must be disabled or allowed" >&2; exit 2 ;;
 esac
@@ -176,18 +195,21 @@ fi
 [ -d "$JOBS/.tasks" ] && find "$JOBS/.tasks" -mindepth 1 -maxdepth 1 -type d -mtime +30 -exec rm -rf {} + 2>/dev/null
 
 # transparent usage gateway (one per runner, stopped with it): the agent's base URL points at it, it forwards unchanged
+# the upstream each base URL would have used: this environment, else the env file, else the API's default
+upstream() {  # <VAR> <default>
+  local v="${!1:-}"
+  [ -z "$v" ] && [ -n "$ENV_FILE" ] && v=$(sed -n "s/^[[:space:]]*\(export[[:space:]]\+\)\?$1=//p" "$ENV_FILE" | tail -1 | sed -E 's/[[:space:]]+#.*$//; s/[[:space:]]+$//' | tr -d "\"'")   # dotenv: an unquoted value ends at " #"
+  printf '%s' "${v:-$2}"
+}
 if [ "$GATEWAY" = 1 ]; then
   mkdir -p "$JOBS/.gateway"; ready="$JOBS/.gateway/port.$$"; rm -f "$ready"
-  # the upstream each base URL would have used: this environment, else the env file, else the API's default
-  upstream() {  # <VAR> <default>
-    local v="${!1:-}"
-    [ -z "$v" ] && [ -n "$ENV_FILE" ] && v=$(sed -n "s/^[[:space:]]*\(export[[:space:]]\+\)\?$1=//p" "$ENV_FILE" | tail -1 | sed -E 's/[[:space:]]+#.*$//; s/[[:space:]]+$//' | tr -d "\"'")   # dotenv: an unquoted value ends at " #"
-    printf '%s' "${v:-$2}"
-  }
   gw_args=(--jobs "$JOBS" --bind "$GATEWAY_BIND" --ready-file "$ready" --budget-input "$TOKEN_BUDGET_IN" --budget-output "$TOKEN_BUDGET_OUT"); for h in ${GATEWAY_EXTRA_HOSTS:-}; do gw_args+=(--extra-host "$h"); done; [ "$GATEWAY_RAW" = 1 ] && gw_args+=(--raw)
   [ "$WEB_SEARCH" = allowed ] && gw_args+=(--server-tools record)   # not an official run: the provider-run tools are only recorded
   # a plain-HTTP base URL (a self-hosted model server, e.g. sglang): the gateway may forward to exactly that host:port
-  [ "$AGENT" = claude-code ] && agent_up=$(upstream ANTHROPIC_BASE_URL https://api.anthropic.com) || agent_up=$(upstream OPENAI_BASE_URL https://api.openai.com/v1)
+  case "$AGENT:${MODEL%%/*}" in
+    claude-code:*|opencode:anthropic) agent_up=$(upstream ANTHROPIC_BASE_URL https://api.anthropic.com) ;;
+    *) agent_up=$(upstream OPENAI_BASE_URL https://api.openai.com/v1) ;;
+  esac
   [[ "$agent_up" =~ ^http://([A-Za-z0-9.-]+:[0-9]+)(/|$) ]] && gw_args+=(--http-host "${BASH_REMATCH[1]}")
   gw_start() {  # [port]: start the gateway (a restart: on the port the agent's base URLs already name); 0 = it listens
     rm -f "$ready"
@@ -209,14 +231,14 @@ u.build_opener(u.ProxyHandler({})).open(sys.argv[1], timeout=15).read()' "$GW/_g
   via_gw() { sed -E -e "s#^https://([^/]+)#$GW/u/\1#; t" -e "s#^http://([A-Za-z0-9.-]+:[0-9]+)#$GW/h/\1#" <<< "$1"; }
   if [ "$AGENT" = claude-code ]; then
     AGENT_ARGS+=(--ae "ANTHROPIC_BASE_URL=$(via_gw "$(upstream ANTHROPIC_BASE_URL https://api.anthropic.com)")")
-  else
+  elif [ "$AGENT" = codex ]; then      # OpenCode: the base URL is in its config (below)
     case "${CODEX_FORCE_AUTH_JSON:-}" in
       1|true|TRUE|yes) AGENT_ARGS+=(--ae "OPENAI_BASE_URL=$(via_gw https://chatgpt.com/backend-api/codex)") ;;
       *) AGENT_ARGS+=(--ae "OPENAI_BASE_URL=$(via_gw "$(upstream OPENAI_BASE_URL https://api.openai.com/v1)")") ;;
     esac
   fi
   # a native config with its own provider URLs (Codex config.toml, Claude Code settings): a copy that points at the gateway
-  if [ -n "$AGENT_CONFIG" ]; then
+  if [ -n "$AGENT_CONFIG" ] && [ "$AGENT" != opencode ]; then
     cfg="$JOBS/.gateway/$(basename "$AGENT_CONFIG").$$"
     sed -E -e "s#^([[:space:]]*base_url[[:space:]]*=[[:space:]]*\")https://([^/\"]+)#\1$GW/u/\2#" \
            -e "s#(\"(ANTHROPIC|OPENAI)_BASE_URL\"[[:space:]]*:[[:space:]]*\")https://([^/\"]+)#\1$GW/u/\3#" "$AGENT_CONFIG" > "$cfg"
@@ -253,6 +275,26 @@ u.build_opener(u.ProxyHandler({})).open(sys.argv[1], timeout=15).read()' "$GW/_g
     [ "$GATEWAY_EGRESS" = gateway ] && log "ChatGPT login: chatgpt.com stays directly reachable beside the gateway (Codex's workspace lookup needs it over HTTPS)" ;;
   esac
   log "usage gateway $GW (pid $gw_pid, raw bodies: $GATEWAY_RAW, token budget $TOKEN_BUDGET_IN in / $TOKEN_BUDGET_OUT out, agent egress: $GATEWAY_EGRESS); per-trial records in <trial>/gateway/"
+fi
+
+# OpenCode's config, one --ak argument built here (AK is split at spaces): scripts/opencode_config.py (one model, no web
+# tools, AGENT_CONFIG merged in) and the provider's base URL in OpenCode's form, through the gateway when it is on. The
+# AI SDK appends /messages to Anthropic's base URL, so it ends in /v1 there (Claude Code's ANTHROPIC_BASE_URL does not);
+# OpenAI's already does. No catalog fetch: every task, open egress too, runs on the catalog compiled into the version.
+if [ "$AGENT" = opencode ]; then
+  oc_base=""
+  case "${MODEL%%/*}" in
+    anthropic) oc_base=$(upstream ANTHROPIC_BASE_URL "")
+               [ "$GATEWAY" = 1 ] && oc_base="${oc_base:-https://api.anthropic.com}"
+               case "${oc_base%/}" in ""|*/v1) oc_base="${oc_base%/}" ;; *) oc_base="${oc_base%/}/v1" ;; esac ;;
+    openai)    oc_base=$(upstream OPENAI_BASE_URL "")
+               [ "$GATEWAY" = 1 ] && oc_base="${oc_base:-https://api.openai.com/v1}" ;;
+  esac
+  [ "$GATEWAY" = 1 ] && oc_base=$(via_gw "$oc_base")
+  oc_cfg=$(python3 "$R/scripts/opencode_config.py" "$MODEL" ${AGENT_CONFIG:+--overlay "$AGENT_CONFIG"} \
+             ${oc_base:+--base-url "$oc_base"} --web-search "$WEB_SEARCH") \
+    || { log "no OpenCode config could be written from AGENT_CONFIG=${AGENT_CONFIG:-(none)} (see above)"; exit 2; }
+  AGENT_ARGS+=(--ak "opencode_config=$oc_cfg" --ae OPENCODE_DISABLE_MODELS_FETCH=1)
 fi
 
 gateway_check() {  # before a job is claimed (GATEWAY=1): the gateway answers, else it is restarted on its port; 1 = it is
