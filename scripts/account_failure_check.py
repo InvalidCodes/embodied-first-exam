@@ -13,6 +13,10 @@ whose model calls had all answered 200 and that ended at its time budget):
            usage limit / Too Many Requests / Missing environment variable;
   claude   the LAST root-level event of <trial>/agent/claude-code.txt is Claude Code's result with is_error set and a text
            that names the same failures (or an invalid key, a low credit balance, a needed login).
+  opencode the LAST root-level event of <trial>/agent/opencode.txt (`opencode run --format=json`; an error OpenCode
+           recovered from is followed by other events) is an `error` whose error is a ProviderAuthError (no key, or one
+           the provider rejects), has an HTTP statusCode 401 / 402 / 429, or whose message names the same failures. Not
+           403: the usage gateway answers a path it refuses with 403, which says nothing about the account.
   gateway  (GATEWAY=1) the usage gateway's <trial>/gateway/totals.json: the trial's last model calls failed
            on the way (failures_in_a_row: the upstream unreachable, the gateway's 502; a stream broken off; a provider
            5xx). One or more: the trial is an infrastructure failure ("infra"; write_task_results.py: not a result, not
@@ -94,11 +98,27 @@ def check(t: str) -> dict:
             msg = str(last.get("result") or last.get("subtype") or "")
             if PAT.search(msg):
                 why.append(f"claude: result: {mask(msg)}")
+    for f in glob.glob(os.path.join(t, "agent", "opencode.txt")):
+        last = None
+        for line in open(f, errors="replace"):
+            if line.startswith("{"):
+                try:
+                    last = json.loads(line)
+                except ValueError:
+                    continue
+        if isinstance(last, dict) and last.get("type") == "error":
+            err = last.get("error")
+            data = (err.get("data") if isinstance(err, dict) else None) or {}
+            kind = str(err.get("name") or "") if isinstance(err, dict) else ""
+            msg = str(data.get("message") if isinstance(data, dict) else "") or kind or str(err)
+            code = data.get("statusCode") if isinstance(data, dict) else None
+            if kind == "ProviderAuthError" or code in (401, 402, 429) or PAT.search(msg):
+                why.append(f"opencode: {kind or 'error'}{f' {code}' if code else ''}: {mask(msg)}")
     return {"trial": name, "stop": bool(why), "why": why, "infra": infra + [w for w in why if w not in infra]}
 
 
 def selftest() -> int:
-    def trial(root, name, rate_limits=None, codex=(), claude=None, totals=None, down=False):
+    def trial(root, name, rate_limits=None, codex=(), claude=None, opencode=None, totals=None, down=False):
         t = os.path.join(root, name, f"{name}__x")
         os.makedirs(os.path.join(t, "agent", "sessions", "2026", "09", "28"))
         if totals is not None:
@@ -110,6 +130,9 @@ def selftest() -> int:
         if claude is not None:
             with open(os.path.join(t, "agent", "claude-code.txt"), "w") as f:
                 f.writelines(json.dumps(e) + "\n" for e in claude)
+        if opencode is not None:
+            with open(os.path.join(t, "agent", "opencode.txt"), "w") as f:
+                f.writelines(json.dumps(e) + "\n" for e in opencode)
         if rate_limits is not None:
             with open(os.path.join(t, "agent", "sessions", "2026", "09", "28", "rollout-x.jsonl"), "w") as f:
                 f.write(json.dumps({"type": "event_msg", "payload": {"type": "token_count", "rate_limits": rate_limits}}) + "\n")
@@ -125,6 +148,26 @@ def selftest() -> int:
     fp = [{"type": "error", "message": "Reconnecting... 1/5 (The server had an error while processing your request. Please "
            "include the request ID 7c1e0429f3ab in your message.)"}, {"type": "item.completed", "item": {
            "type": "command_execution", "aggregated_output": 'x = 429 ... {"type":"error","code":429} usage limit'}}] + done
+    # OpenCode 1.19.4 (`opencode run --format=json`), recorded 2026-10-26 against Anthropic through the usage gateway:
+    # no key in the environment; a local proxy answering 502 in front of the gateway; a run that ended by itself
+    oc_no_key = {"type": "error", "timestamp": 1793011870605, "sessionID": "ses_e882a277effekRvNfTb6HSHFK5", "error": {
+        "name": "ProviderAuthError", "data": {"providerID": "anthropic", "message": "Anthropic API key is missing. Pass it "
+                                              "using the 'apiKey' parameter or the ANTHROPIC_API_KEY environment variable."}}}
+    oc_502 = {"type": "error", "timestamp": 1793012077117, "sessionID": "ses_e88280a67ffeVJVzQ7P4aSkaWa", "error": {
+        "name": "APIError", "data": {"message": "Bad Gateway", "statusCode": 502, "isRetryable": True, "responseHeaders": {
+            "connection": "keep-alive", "content-length": "0", "proxy-connection": "keep-alive"}, "responseBody": "",
+            "metadata": {"url": "http://127.0.0.1:18080/u/api.anthropic.com/v1/messages"}}}}
+    oc_done = [{"type": "step_start", "part": {"type": "step-start"}},
+               {"type": "tool_use", "part": {"type": "tool", "tool": "bash", "state": {"status": "completed",
+                "input": {"command": "ls -la"}, "output": "total 8\n"}}},
+               {"type": "step_finish", "part": {"type": "step-finish", "reason": "tool-calls", "tokens": {
+                "total": 18621, "input": 4, "output": 83, "reasoning": 0, "cache": {"write": 18534, "read": 0}}}},
+               {"type": "step_start", "part": {"type": "step-start"}},
+               {"type": "text", "part": {"type": "text", "text": "The directory contains: cache/, cfg/, data/"}},
+               {"type": "step_finish", "part": {"type": "step-finish", "reason": "stop", "tokens": {
+                "total": 19017, "input": 2, "output": 82, "reasoning": 55, "cache": {"write": 344, "read": 18534}}}}]
+    oc_api = lambda code, msg: {"type": "error", "error": {"name": "APIError", "data": {
+        "message": msg, "statusCode": code, "isRetryable": code in (429, 500, 502, 503)}}}
     tot = lambda n, last="unreachable: ConnectionRefusedError": {"requests": 4, "input": 9, "output": 3, "upstream_failures": n + 1,
                                                                   "failures_in_a_row": n, "last_upstream_failure": last}
     cases = {  # name: (kwargs, expected stop[, expected infra])
@@ -147,6 +190,17 @@ def selftest() -> int:
         "claude_ok": (dict(claude=[{"type": "assistant"}, {"type": "result", "subtype": "success", "is_error": False, "result": "done"}]), False),
         "claude_tool_429_then_ok": (dict(claude=[{"type": "user", "message": "HTTP 429 from a tool"}, {"type": "result", "is_error": False,
                                                                                                          "result": "finished"}]), False),
+        "opencode_no_key": (dict(opencode=[oc_no_key]), True),
+        "opencode_proxy_502": (dict(opencode=[oc_502]), False),
+        "opencode_ok": (dict(opencode=oc_done), False),
+        "opencode_429_retries_spent": (dict(opencode=oc_done[:3] + [oc_api(429, "Too Many Requests")]), True),
+        "opencode_credit": (dict(opencode=[oc_api(400, "Your credit balance is too low to access the Anthropic API.")]), True),
+        # the usage gateway refuses a path that is not a model call with 403: the trial is one to look at, not the account
+        "opencode_gateway_403": (dict(opencode=[oc_api(403, "usage gateway: POST /v1/files is not a model API call and "
+                                                       "was not forwarded")]), False),
+        "opencode_429_then_ok": (dict(opencode=[oc_api(429, "Too Many Requests")] + oc_done), False),
+        "opencode_tool_401_then_ok": (dict(opencode=[{"type": "tool_use", "part": {"state": {
+            "output": "HTTP 401 Unauthorized from the simulator"}}}] + oc_done[3:]), False),
         # the gateway's upstream unreachable / a stream broken off / a provider 5xx at the end of the trial
         "gateway_502_x5": (dict(codex=[{"type": "turn.failed", "error": {"message": "stream disconnected before completion: "
                                 "error sending request for url (http://172.17.0.1:4000/u/api.openai.com/v1/responses)"}}],
