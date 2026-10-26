@@ -132,7 +132,14 @@ checked by `ci_checks/check-resources.py`).
 ## Agent logs and timelines
 Harbor keeps, per trial, `agent/codex.txt` (every message, command and output), `agent/trajectory.json` and the raw
 Codex session (`agent/sessions/`). Run Codex with `--ak reasoning_summary=detailed` to also keep reasoning summaries
-(otherwise reasoning is stored encrypted).
+(otherwise reasoning is stored encrypted). OpenCode: `agent/opencode.txt` (its `run --format=json` stream: every step,
+tool call and output, and an `error` event for each session error), `agent/trajectory.json`, and its session database
+`agent/opencode/xdg-data/opencode/opencode.db` (SQLite; `scripts/log_mirror.py` keeps a version of it at most every
+5 minutes). Harbor's OpenCode token counts (`n_input_tokens` / `n_output_tokens`) leave out cache writes, reasoning
+and OpenCode's session-title calls; the usage gateway's `totals.json` counts every call, and the per-task results show
+both. Harbor ends an OpenCode trial with `NonZeroAgentExitCodeError` whenever the stream has an `error` event, a
+recovered one too, so such a trial is not a result (Infrastructure failures above), as for any harness that exits
+with an error.
 
 ## Recordings
 
@@ -265,7 +272,8 @@ checked. Configuration is Harbor's own:
 
 | what | how |
 |---|---|
-| agent, model, effort | `AGENT=codex` or `claude-code`, `MODEL`, `EFFORT` (`--ak reasoning_effort`), more options in `AK` |
+| agent, model, effort | `AGENT=codex`, `claude-code` or `opencode`, `MODEL`, `EFFORT` (`--ak reasoning_effort`; OpenCode: `--ak variant`), more options in `AK`; `AGENT_VERSION` pins the harness (`--ak version`; OpenCode 1.19.4 by default) |
+| OpenCode | `MODEL=anthropic/<model>` with `ANTHROPIC_API_KEY`, or `openai/<model>` with `OPENAI_API_KEY`; with `GATEWAY=1` only these two (OpenCode reaches every other provider, OpenRouter included, by chat completions, which the gateway does not forward; the runner refuses such a run). Its one `--ak opencode_config=` is written by `scripts/opencode_config.py`: the run's model as `small_model` (else each session is named by another model of the provider, e.g. claude-haiku-5-5, a call Harbor's token count leaves out), webfetch and websearch denied, the provider's base URL in OpenCode's form (Anthropic's ends in `/v1`, unlike Claude Code's `ANTHROPIC_BASE_URL`), through the gateway when it is on; `AGENT_CONFIG` is a JSON OpenCode config merged into it (a model's `limit` / `cost` its catalog lacks), refused if it turns a web tool on; `OPENCODE_DISABLE_MODELS_FETCH=1` (the catalog compiled into the version) |
 | OpenRouter | Codex: `OPENAI_API_KEY=<OpenRouter key> OPENAI_BASE_URL=https://openrouter.ai/api/v1`; for long runs declare OpenRouter as a provider of its own in the `AGENT_CONFIG` file (`model_provider = "openrouter"`, its `base_url`, `env_key = "OPENAI_API_KEY"`, `wire_api = "responses"`, `supports_websockets = false`): as "OpenAI", Codex compacts a full context through an endpoint OpenRouter does not serve and the run stops ("Error running remote compact task"). Claude Code: `ANTHROPIC_BASE_URL=https://openrouter.ai/api` with the key in `ANTHROPIC_API_KEY` |
 | ChatGPT login (Codex) | `CODEX_FORCE_AUTH_JSON=1` (Harbor uploads `~/.codex/auth.json` into each trial) |
 | Claude subscription | `CLAUDE_FORCE_OAUTH=1` and `CLAUDE_CODE_OAUTH_TOKEN` (`claude setup-token`) |
@@ -395,7 +403,12 @@ official run starts the harness without them. For Codex the runner does it with 
 that turns one of them on, and an `AK` that carries its own `config=` (Harbor would keep the last one). A config that
 already sets them to false, as a scheduler's own may, is accepted. For a bare `harbor run`:
 `--ak config=<the output of scripts/codex_tools_off.py [your config.toml]>`. Claude Code's settings stay the
-caller's (`AGENT_CONFIG`). An API key can still request a search directly; the usage gateway
+caller's (`AGENT_CONFIG`). OpenCode (1.19.4) declares only tools it runs itself; it offers `webfetch` (fetched from
+the container) by default and `websearch` (Exa or Parallel, outside the container) only for the `opencode` provider or
+with `OPENCODE_EXPERIMENTAL` / `OPENCODE_ENABLE_EXA`: the runner denies both in its config
+(`scripts/opencode_config.py`; a denied tool is not offered), and refuses an `AGENT_CONFIG` that allows one and an `AK`
+that carries its own `opencode_config=`. For a bare `harbor run`: `--ak opencode_config=$(python3
+scripts/opencode_config.py <provider>/<model>)`. An API key can still request a search directly; the usage gateway
 refuses such a request and every path that is not a model call (below, leakage.md).
 
 ## Usage gateway (token usage per request, optional)

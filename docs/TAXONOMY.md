@@ -96,8 +96,8 @@ actively. The standard-realtime mode is offered where a benchmark's tasks call f
 - No versions or durations in names; a task's version is its digest (`tasks/<benchmark>/<task>/DIGEST`).
 
 ## Run ids
-`<harness>-<model>-<effort>`, for example `codex-gpt6_luna-xhigh` or `claude_code-claude_fable_5_1-max`.
-- `harness`: the Harbor agent name with `-` replaced by `_` (`codex`, `claude_code`).
+`<harness>-<model>-<effort>`, for example `codex-gpt6_luna-xhigh` or `claude_code-fable_5_1-max`.
+- `harness`: the Harbor agent name with `-` replaced by `_` (`codex`, `claude_code`, `opencode`).
 - `model`: lower case, vendor prefix dropped, characters other than letters and digits replaced by `_`. Reuse the token
   already used for a model in existing results (`gpt6_luna`, `gpt6_astra`, `fable_5_1`).
 - `effort`: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `default` when the harness sets none.
