@@ -17,6 +17,7 @@ request bodies of a capture-only fake API):
 --overlay is the caller's own OpenCode config (JSON, AGENT_CONFIG), merged first. One that allows webfetch or websearch
 under --web-search disabled, or names another small_model, is refused (exit 2), never overridden silently; its baseURL
 is replaced by --base-url. Prints the config as one compact JSON line."""
+
 import argparse
 import json
 import sys
@@ -74,7 +75,7 @@ def main(argv=None):
     try:
         overlay = json.load(open(a.overlay)) if a.overlay else None
         cfg = config(a.model, overlay, a.base_url, a.web_search)
-    except (OSError, ValueError) as e:            # json.JSONDecodeError is a ValueError
+    except (OSError, ValueError) as e:  # json.JSONDecodeError is a ValueError
         print(f"opencode_config: {e}", file=sys.stderr)
         return 2
     print(json.dumps(cfg, separators=(",", ":")))

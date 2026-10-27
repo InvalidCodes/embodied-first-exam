@@ -1,7 +1,8 @@
 """Tests for scripts/opencode_config.py: the OpenCode config a run starts from (one model, no web tools, its base URL).
 
-    python3 scripts/tests/test_opencode_config.py     # stdlib only
+python3 scripts/tests/test_opencode_config.py     # stdlib only
 """
+
 import json
 import pathlib
 import subprocess
@@ -31,34 +32,50 @@ class Config(unittest.TestCase):
             m.config(M, web_search="maybe")
 
     def test_overlay_is_kept(self):
-        over = {"provider": {"anthropic": {"models": {"claude-opus-5-5": {"limit": {"context": 1000000, "output": 128000}}},
-                                           "options": {"baseURL": "https://elsewhere.example/v1", "timeout": 600000}}},
-                "permission": {"bash": "allow"}}
+        over = {
+            "provider": {
+                "anthropic": {
+                    "models": {"claude-opus-5-5": {"limit": {"context": 1000000, "output": 128000}}},
+                    "options": {"baseURL": "https://elsewhere.example/v1", "timeout": 600000},
+                }
+            },
+            "permission": {"bash": "allow"},
+        }
         cfg = m.config(M, over, base_url=GW)
         opts = cfg["provider"]["anthropic"]["options"]
-        self.assertEqual(opts, {"baseURL": GW, "timeout": 600000})        # the runner's base URL replaces the overlay's
+        self.assertEqual(opts, {"baseURL": GW, "timeout": 600000})  # the runner's base URL replaces the overlay's
         self.assertEqual(cfg["provider"]["anthropic"]["models"], over["provider"]["anthropic"]["models"])
         self.assertEqual(cfg["permission"], {"bash": "allow", "webfetch": "deny", "websearch": "deny"})
-        self.assertEqual(over["provider"]["anthropic"]["options"]["baseURL"], "https://elsewhere.example/v1")  # not mutated
+        self.assertEqual(
+            over["provider"]["anthropic"]["options"]["baseURL"], "https://elsewhere.example/v1"
+        )  # not mutated
 
     def test_overlay_that_denies_already(self):
         cfg = m.config(M, {"permission": {"webfetch": "deny"}, "tools": {"websearch": False}})
         self.assertEqual(cfg["permission"], {"webfetch": "deny", "websearch": "deny"})
 
     def test_refused(self):
-        for over in ({"permission": {"webfetch": "allow"}}, {"permission": {"websearch": "ask"}},
-                     {"permission": {"webfetch": {"*": "allow"}}}, {"tools": {"webfetch": True}},
-                     {"permission": "allow"}, {"small_model": "anthropic/claude-haiku-5-5"}, ["not", "an", "object"]):
+        for over in (
+            {"permission": {"webfetch": "allow"}},
+            {"permission": {"websearch": "ask"}},
+            {"permission": {"webfetch": {"*": "allow"}}},
+            {"tools": {"webfetch": True}},
+            {"permission": "allow"},
+            {"small_model": "anthropic/claude-haiku-5-5"},
+            ["not", "an", "object"],
+        ):
             with self.assertRaises(ValueError, msg=over):
                 m.config(M, over)
         with self.assertRaises(ValueError):
-            m.config("claude-opus-5-5")                                     # no provider
+            m.config("claude-opus-5-5")  # no provider
         with self.assertRaises(ValueError):
             m.config(M, {"provider": {"anthropic": "x"}}, base_url=GW)
 
     def test_allowed_web_tools_are_left_alone(self):
-        self.assertEqual(m.config(M, {"permission": {"webfetch": "allow"}}, web_search="allowed")["permission"],
-                         {"webfetch": "allow"})
+        self.assertEqual(
+            m.config(M, {"permission": {"webfetch": "allow"}}, web_search="allowed")["permission"],
+            {"webfetch": "allow"},
+        )
 
 
 class Cli(unittest.TestCase):

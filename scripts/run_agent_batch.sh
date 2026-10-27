@@ -195,10 +195,14 @@ fi
 [ -d "$JOBS/.tasks" ] && find "$JOBS/.tasks" -mindepth 1 -maxdepth 1 -type d -mtime +30 -exec rm -rf {} + 2>/dev/null
 
 # transparent usage gateway (one per runner, stopped with it): the agent's base URL points at it, it forwards unchanged
-# the upstream each base URL would have used: this environment, else the env file, else the API's default
+# the upstream each base URL would have used: this environment, else the env file, else the repository's .env and
+# .env.local (each job copy links them, and Harbor loads them: scripts/efe.py load_env, .env.local by Harbor itself),
+# else the API's default
 upstream() {  # <VAR> <default>
-  local v="${!1:-}"
-  [ -z "$v" ] && [ -n "$ENV_FILE" ] && v=$(sed -n "s/^[[:space:]]*\(export[[:space:]]\+\)\?$1=//p" "$ENV_FILE" | tail -1 | sed -E 's/[[:space:]]+#.*$//; s/[[:space:]]+$//' | tr -d "\"'")   # dotenv: an unquoted value ends at " #"
+  local v="${!1:-}" f
+  for f in "$ENV_FILE" "$R/.env" "$R/.env.local"; do
+    [ -z "$v" ] && [ -n "$f" ] && [ -f "$f" ] && v=$(sed -n "s/^[[:space:]]*\(export[[:space:]]\+\)\?$1=//p" "$f" | tail -1 | sed -E 's/[[:space:]]+#.*$//; s/[[:space:]]+$//' | tr -d "\"'")   # dotenv: an unquoted value ends at " #"
+  done
   printf '%s' "${v:-$2}"
 }
 if [ "$GATEWAY" = 1 ]; then
